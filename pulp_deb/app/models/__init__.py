@@ -5,6 +5,7 @@ from .content import (
     GenericContent,
     InstallerPackage,
     Package,
+    SourcePackage,
 )
 
 from .structure_content import (
@@ -12,9 +13,10 @@ from .structure_content import (
     ReleaseArchitecture,
     ReleaseComponent,
     PackageReleaseComponent,
+    SourcePackageReleaseComponent,
 )
 
-from .metadata_content import ReleaseFile, PackageIndex, InstallerFileIndex
+from .metadata_content import ReleaseFile, PackageIndex, InstallerFileIndex, SourceIndex
 
 from .publication import AptDistribution, AptPublication, VerbatimPublication
 
