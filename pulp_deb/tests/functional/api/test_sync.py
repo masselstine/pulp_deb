@@ -1,6 +1,7 @@
 # coding=utf-8
 """Tests that sync deb plugin repositories."""
 import unittest
+import pytest
 
 from pulp_smash import config
 from pulp_smash.pulp3.bindings import monitor_task, PulpTaskError, delete_orphans
@@ -13,6 +14,7 @@ from pulp_smash.pulp3.utils import (
 from pulp_deb.tests.functional.constants import (
     DEB_FIXTURE_SUMMARY,
     DEB_FULL_FIXTURE_SUMMARY,
+    DEB_SOURCE_FIXTURE_SUMMARY,
     DEB_INVALID_FIXTURE_URL,
     DEB_FIXTURE_URL,
     DEB_FIXTURE_DISTRIBUTIONS,
@@ -42,13 +44,20 @@ class BasicSyncTestCase(unittest.TestCase):
 
     def test_sync_small(self):
         """Test synching with deb content only."""
-        self.do_sync(sync_udebs=False, fixture_summary=DEB_FIXTURE_SUMMARY)
+        self.do_sync(fixture_summary=DEB_FIXTURE_SUMMARY)
 
     def test_sync_full(self):
         """Test synching with udeb."""
-        self.do_sync(sync_udebs=True, fixture_summary=DEB_FULL_FIXTURE_SUMMARY)
+        self.do_sync(syncs={"sync_udebs": True}, fixture_summary=DEB_FULL_FIXTURE_SUMMARY)
 
-    def do_sync(self, sync_udebs, fixture_summary):
+    @pytest.mark.skip(reason="Requires https://fixtures.pulpproject.org update")
+    def test_sync_sources(
+        self,
+    ):
+        """Test synching with sources."""
+        self.do_sync(syncs={"sync_sources": True}, fixture_summary=DEB_SOURCE_FIXTURE_SUMMARY)
+
+    def do_sync(self, *, syncs={}, fixture_summary):
         """Sync repositories with the deb plugin.
 
         In order to sync a repository a remote has to be associated within
@@ -74,7 +83,7 @@ class BasicSyncTestCase(unittest.TestCase):
         repo = repo_api.create(gen_repo())
         self.addCleanup(repo_api.delete, repo.pulp_href)
 
-        body = gen_deb_remote(sync_udebs=sync_udebs, gpgkey=DEB_SIGNING_KEY)
+        body = gen_deb_remote(**syncs, gpgkey=DEB_SIGNING_KEY)
         remote = remote_api.create(body)
         self.addCleanup(remote_api.delete, remote.pulp_href)
 

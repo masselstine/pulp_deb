@@ -91,6 +91,7 @@ def gen_local_deb_remote(
     url,
     distributions=DEB_FIXTURE_DISTRIBUTIONS,
     sync_udebs=False,
+    sync_sources=False,
     gpgkey=None,
     **kwargs,
 ):
@@ -106,6 +107,7 @@ def gen_local_deb_remote(
         "url": url,
         "distributions": distributions,
         "sync_udebs": sync_udebs,
+        "sync_sources": sync_sources,
     }
     data.update(kwargs)
     return data
@@ -115,6 +117,7 @@ def gen_deb_remote(
     url=DEB_FIXTURE_URL,
     distributions=DEB_FIXTURE_DISTRIBUTIONS,
     sync_udebs=False,
+    sync_sources=False,
     gpgkey=None,
     **kwargs,
 ):
@@ -124,7 +127,9 @@ def gen_deb_remote(
     """
     if gpgkey:
         kwargs["gpgkey"] = gpgkey
-    return gen_remote(url, distributions=distributions, sync_udebs=sync_udebs, **kwargs)
+    return gen_remote(
+        url, distributions=distributions, sync_udebs=sync_udebs, sync_sources=sync_sources, **kwargs
+    )
 
 
 def get_deb_content_unit_paths(repo, version_href=None):

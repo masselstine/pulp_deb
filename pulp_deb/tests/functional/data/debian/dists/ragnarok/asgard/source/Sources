@@ -1,0 +1,31 @@
+Package: hello
+Binary: hello
+Version: 2.10-2ubuntu4
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Original-Maintainer: Santiago Vila <sanvila@debian.org>
+Build-Depends: debhelper-compat (= 9)
+Architecture: any
+Standards-Version: 4.3.0
+Format: 3.0 (quilt)
+Directory: pool/asgard/h/hello
+Files:
+ 43f8fd6bd1aef52786beb6e171368ecf 6832 hello_2.10-2ubuntu4.debian.tar.xz
+ c9766c32fececc15fb0e0f397e858da2 1465 hello_2.10-2ubuntu4.dsc
+ 6cd0ffea3884a4e79330338dcc2987d6 725946 hello_2.10.orig.tar.gz
+Checksums-Sha1:
+ ce06556db96050340cc26a5c5b563bdc57d46f0e 6832 hello_2.10-2ubuntu4.debian.tar.xz
+ 4dea94ca1d01d8903a6afa3bd75ffa01f2739117 1465 hello_2.10-2ubuntu4.dsc
+ f7bebf6f9c62a2295e889f66e05ce9bfaed9ace3 725946 hello_2.10.orig.tar.gz
+Checksums-Sha256:
+ 1fd3b7bdee98c1314a43700f42fc0df8a06e194eda40117d096c8e26f5198a8a 6832 hello_2.10-2ubuntu4.debian.tar.xz
+ 47ec81bf3c2c5d6d9e05cf5f3ad764b21483313b30217cab55855363fe516880 1465 hello_2.10-2ubuntu4.dsc
+ 31e066137a962676e89f69d1b65382de95a7ef7d914b8cb956f41ea72e0f516b 725946 hello_2.10.orig.tar.gz
+Checksums-Sha512:
+ 0e324a69a58c05dcc7c271a0927bac94d120fd405eb52c71fdbd3ee4a9f4dc0ae06d46659dee060493d260c91404111a51f6fb768ce45b3ee8c4915d9a639afe 6832 hello_2.10-2ubuntu4.debian.tar.xz
+ d4947f9c0189cf3979d91bc87d14ab9dcdb2a12a937d8f2d4844daaa0dbdec50e3ffbd53b5d19e1a2695a5fde43ab9a79acff18489cd01c41544aac8f211bc55 1465 hello_2.10-2ubuntu4.dsc
+ e301d785135c52575a8b4c35994c0316f8d366451f604eb5e74c1f907077502aebd5a1a32cd1e26cd7ca32c22f4de5623a335f8ae7e735ac977420df664f01de 725946 hello_2.10.orig.tar.gz
+Homepage: http://www.gnu.org/software/hello/
+Package-List:
+ hello deb devel optional arch=any
+Testsuite: autopkgtest
+
