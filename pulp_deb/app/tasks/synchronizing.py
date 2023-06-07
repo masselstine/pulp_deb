@@ -565,6 +565,15 @@ class DebFirstStage(Stage):
             and self.previous_sync_info["sync_options"]["mirror"]
             == self.sync_info["sync_options"]["mirror"]
         )
+        # Allow server to send file without additional attempts to compress
+        # which will result in aiohttp.client to decompress the file which
+        # is not expected or wanted.
+        self.remote.headers = [{"Accept-Encoding": "identity"}]
+        # if not source_da.remote.headers:
+        #    source_da.remote.headers = MultiDict({"Accept-Encoding": "identity"})
+        # else:
+        #    source_da.remote.headers.popall("Accept-Encoding")
+        #    source_da.remote.headers.extend(MultiDict({"Accept-Encoding": "identity"}))
 
     async def run(self):
         """

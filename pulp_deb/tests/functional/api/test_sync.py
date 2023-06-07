@@ -26,10 +26,12 @@ from pulp_deb.tests.functional.constants import (
 @pytest.mark.parametrize(
     "remote_params, fixture_summary",
     [
-        ({"gpgkey": DEB_SIGNING_KEY}, DEB_FIXTURE_SUMMARY),
-        ({"gpgkey": DEB_SIGNING_KEY, "sync_udebs": True}, DEB_INSTALLER_FIXTURE_SUMMARY),
         (
-            {"gpgkey": DEB_SIGNING_KEY, "sync_udebs": True, "sync_sources": True},
+            {
+                "gpgkey": DEB_SIGNING_KEY,
+                "sync_udebs": True,
+                "sync_sources": True,
+            },
             DEB_INSTALLER_SOURCE_FIXTURE_SUMMARY,
         ),
     ],

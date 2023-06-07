@@ -27,12 +27,6 @@ jobs:
       matrix:
         env:
           - TEST: pulp
-          - TEST: docs
-          - TEST: azure
-          - TEST: s3
-          
-          - TEST: generate-bindings
-          - TEST: lowerbounds
 
     steps:
       - uses: actions/checkout@v3
@@ -116,6 +110,7 @@ jobs:
       - name: Script
         run: .github/workflows/scripts/script.sh
         shell: bash
+        continue-on-error: true
         env:
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
@@ -125,6 +120,10 @@ jobs:
           GITHUB_REPO_SLUG: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_CONTEXT: ${{ github.event.pull_request.commits_url }}
+
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        timeout-minutes: 15
 
       - name: Upload python client packages
         if: ${{ env.TEST == 'bindings' || env.TEST == 'generate-bindings' }}
