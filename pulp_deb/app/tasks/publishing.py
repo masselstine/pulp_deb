@@ -82,6 +82,7 @@ def publish(
     repository_version_pk,
     simple,
     structured,
+    snapshot,
     signing_service_pk=None,
     publish_upstream_release_fields=None,
 ):
@@ -115,7 +116,7 @@ def publish(
         )
     )
     with tempfile.TemporaryDirectory(".") as temp_dir:
-        with AptPublication.create(repo_version, pass_through=False) as publication:
+        with AptPublication.create(repo_version, pass_through=False, snapshot=snapshot) as publication:
             publication.simple = simple
             publication.structured = structured
             publication.signing_service = signing_service
