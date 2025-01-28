@@ -83,6 +83,7 @@ class AptPublicationViewSet(PublicationViewSet):
         repository_version = serializer.validated_data.get("repository_version")
         simple = serializer.validated_data.get("simple")
         structured = serializer.validated_data.get("structured")
+        checkpoint = serializer.validated_data.get("checkpoint")
         signing_service = serializer.validated_data.get("signing_service")
         publish_upstream_release_fields = serializer.validated_data.get(
             "publish_upstream_release_fields"
@@ -95,6 +96,7 @@ class AptPublicationViewSet(PublicationViewSet):
                 "repository_version_pk": repository_version.pk,
                 "simple": simple,
                 "structured": structured,
+                "checkpoint": checkpoint,
                 "signing_service_pk": getattr(signing_service, "pk", None),
                 "publish_upstream_release_fields": publish_upstream_release_fields,
             },
