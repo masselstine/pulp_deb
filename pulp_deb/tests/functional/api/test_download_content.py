@@ -1,12 +1,15 @@
 """Tests that verify download of content served by Pulp."""
+
 import os
 import pytest
 import hashlib
+import re
 from random import choice
 from urllib.parse import urljoin
 
 from pulp_deb.tests.functional.constants import (
     DEB_FIXTURE_STANDARD_REPOSITORY_NAME,
+    DEB_FIXTURE_SINGLE_DIST,
     DEB_GENERIC_CONTENT_NAME,
     DEB_PACKAGE_NAME,
     DEB_PACKAGE_RELEASE_COMPONENT_NAME,
@@ -169,3 +172,77 @@ def test_download_content(
         content = download_content_unit(distribution.base_path, unit_path[1])
         pulp_hashes.append(hashlib.sha256(content).hexdigest())
     assert fixtures_hashes == pulp_hashes
+
+
+@pytest.mark.parallel
+def test_download_cached_content(
+    deb_init_and_sync,
+    deb_distribution_factory,
+    deb_publication_factory,
+    deb_fixture_server,
+    download_content_unit,
+    http_get,
+    deb_get_content_types,
+    deb_modify_repository,
+):
+    """Verify that previously published content can still be downloaded."""
+    # Create/sync a repo and then a distro
+    repo, _ = deb_init_and_sync()
+    distribution = deb_distribution_factory(repository=repo)
+    deb_publication_factory(repo, structured=True, simple=True)
+
+    # Find a random package and get its hash digest
+    package_content = deb_get_content_types("apt_package_api", DEB_PACKAGE_NAME, repo)
+    package = choice(package_content)
+    url = deb_fixture_server.make_url(DEB_FIXTURE_STANDARD_REPOSITORY_NAME)
+    package_hash = hashlib.sha256(http_get(urljoin(url, package.relative_path))).hexdigest()
+
+    # Remove content and republish
+    deb_modify_repository(repo, {"remove_content_units": ["*"]})
+    deb_publication_factory(repo, structured=True, simple=True)
+
+    # Download the package and check its checksum
+    content = download_content_unit(distribution.base_path, package.relative_path)
+    content_hash = hashlib.sha256(content).hexdigest()
+
+    assert package_hash == content_hash
+
+
+@pytest.mark.parallel
+def test_apt_by_hash(
+    deb_init_and_sync,
+    deb_publication_factory,
+    deb_distribution_factory,
+    deb_get_content_types,
+    download_content_unit,
+):
+    """Verify that deb and deb source content is available in the by-hash path."""
+    # Create/sync a repo and then do a publish and create a distro
+    repo, _ = deb_init_and_sync(remote_args={"sync_sources": True})
+    deb_publication_factory(repo, structured=True, simple=True)
+    distribution = deb_distribution_factory(repository=repo)
+
+    # Obtain the Release file and parse out the sha256
+    release_metadata = deb_get_content_types(
+        "apt_release_file_api", DEB_RELEASE_FILE_NAME, repo, repo.latest_version_href
+    )
+    single_release_metadata = next(
+        release for release in release_metadata if release.distribution == DEB_FIXTURE_SINGLE_DIST
+    )
+    release_file_path = next(
+        key for key in single_release_metadata.artifacts.keys() if key.endswith("/Release")
+    )
+    release_file = download_content_unit(distribution.base_path, release_file_path).decode("utf-8")
+    sha256_section = release_file.split("SHA256:")[1].split("SHA512:")[0].strip()
+    sha256_pattern = re.compile(
+        r"([a-fA-F0-9]{64})\s+\d+\s+([^/\s]+/[^/\s]+)/(Packages|Sources)(?:\s|\n)"
+    )
+    matches = sha256_pattern.findall(sha256_section)
+    sha256_dict = {path: sha for sha, path, _ in matches}
+
+    # Verify that all by-hash files are available
+    for path, sha256 in sha256_dict.items():
+        content_url = f"dists/{DEB_FIXTURE_SINGLE_DIST}/{path}/by-hash/SHA256/{sha256}"
+        assert "404" not in download_content_unit(distribution.base_path, content_url).decode(
+            "utf-8"
+        )

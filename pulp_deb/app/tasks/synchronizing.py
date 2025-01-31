@@ -185,6 +185,36 @@ def synchronize(remote_pk, repository_pk, mirror, optimize):
     if not remote.url:
         raise ValueError(_("A remote must have a url specified to synchronize."))
 
+    if optimize and mirror:
+        skip_dist = []
+        for dist in remote.distributions.split():
+            artifact_set_sha256 = get_distribution_release_file_artifact_set_sha256(dist, remote)
+            previous_release_file = get_previous_release_file(previous_repo_version, dist)
+            if (
+                previous_release_file
+                and previous_release_file.artifact_set_sha256 == artifact_set_sha256
+            ):
+                skip_dist.append(True)
+            else:
+                skip_dist.append(False)
+
+        remote_options = gen_remote_options(remote)
+        if not previous_repo_version.info:
+            optimize = False
+        elif not previous_repo_version.info["remote_options"] == remote_options:
+            optimize = False
+        elif not previous_repo_version.info["sync_options"]["mirror"] and mirror:
+            optimize = False
+
+        if all(skip_dist) and optimize:
+            log.info("No change in ReleaseFiles detected. Skipping sync.")
+            with ProgressReport(
+                message="Skipping sync (no changes for any ReleaseFile)",
+                code="sync.complete_skip.was_skipped",
+            ) as pb:
+                asyncio.run(pb.aincrement())
+            return
+
     first_stage = DebFirstStage(remote, optimize, mirror, previous_repo_version)
     DebDeclarativeVersion(first_stage, repository, mirror=mirror).create()
 
@@ -369,7 +399,7 @@ class DebUpdateReleaseFileAttributes(Stage):
                                 release_file.relative_path = da_names["Release"].relative_path
                         else:
                             if self.gpgkey:
-                                d_content.d_artifacts.delete(da_names["Release"])
+                                d_content.d_artifacts.remove(da_names["Release"])
                             else:
                                 release_file_artifact = da_names["Release"].artifact
                                 release_file.relative_path = da_names["Release"].relative_path
@@ -472,16 +502,22 @@ class DebUpdatePackageIndexAttributes(Stage):  # TODO: Needs a new name
                         # No main_artifact found, uncompress one
                         relative_dir = os.path.dirname(d_content.content.relative_path)
                         filename = _uncompress_artifact(d_content.d_artifacts, relative_dir)
-                        da = DeclarativeArtifact(
-                            artifact=Artifact.init_and_validate(
-                                filename, expected_digests={"sha256": content.sha256}
-                            ),
-                            url=filename,
-                            relative_path=content.relative_path,
-                            remote=d_content.d_artifacts[0].remote,
-                        )
-                        d_content.d_artifacts.append(da)
-                        await _save_artifact_blocking(da)
+
+                        try:
+                            da = DeclarativeArtifact(
+                                artifact=Artifact.init_and_validate(
+                                    filename, expected_digests={"sha256": content.sha256}
+                                ),
+                                url=filename,
+                                relative_path=content.relative_path,
+                                remote=d_content.d_artifacts[0].remote,
+                            )
+                            d_content.d_artifacts.append(da)
+                            await _save_artifact_blocking(da)
+                        finally:
+                            # Ensure the uncompressed file is deleted after usage
+                            if os.path.exists(filename):
+                                os.remove(filename)
                     content.artifact_set_sha256 = _get_artifact_set_sha256(
                         d_content, PackageIndex.SUPPORTED_ARTIFACTS
                     )
@@ -547,7 +583,7 @@ class DebFirstStage(Stage):
         self.optimize = optimize
         self.previous_repo_version = previous_repo_version
         self.sync_info = defaultdict()
-        self.sync_info["remote_options"] = self._gen_remote_options()
+        self.sync_info["remote_options"] = gen_remote_options(self.remote)
         self.sync_info["sync_options"] = {
             "optimize": optimize,
             "mirror": mirror,
@@ -598,19 +634,6 @@ class DebFirstStage(Stage):
             remote=self.remote,
             deferred_download=False,
         )
-
-    def _gen_remote_options(self):
-        return {
-            "distributions": self.remote.distributions,
-            "components": self.remote.components,
-            "architectures": self.remote.architectures,
-            "policy": self.remote.policy,
-            "sync_sources": self.remote.sync_sources,
-            "sync_udebs": self.remote.sync_udebs,
-            "sync_installer": self.remote.sync_installer,
-            "gpgkey": self.remote.gpgkey,
-            "ignore_missing_package_indices": self.remote.ignore_missing_package_indices,
-        }
 
     async def _handle_distribution(self, distribution):
         log.info(_('Downloading Release file for distribution: "{}"').format(distribution))
@@ -932,7 +955,9 @@ class DebFirstStage(Stage):
         # parse package_index
         package_futures = []
         package_index_artifact = await _get_main_artifact_blocking(package_index)
-        for package_paragraph in deb822.Packages.iter_paragraphs(package_index_artifact.file):
+        for package_paragraph in deb822.Packages.iter_paragraphs(
+            package_index_artifact.file, use_apt_pkg=False
+        ):
             # Sanity check the architecture from the package paragraph:
             package_paragraph_architecture = package_paragraph["Architecture"]
             if release_file.distribution[-1] == "/":
@@ -1108,7 +1133,9 @@ class DebFirstStage(Stage):
         # parse source_index
         source_package_content_futures = []
         source_index_artifact = await _get_main_artifact_blocking(source_index)
-        for source_paragraph in deb822.Sources.iter_paragraphs(source_index_artifact.file):
+        for source_paragraph in deb822.Sources.iter_paragraphs(
+            source_index_artifact.file, use_apt_pkg=False
+        ):
             try:
                 source_dir = source_paragraph["Directory"]
                 source_relpath = os.path.join(source_dir, "blah")
@@ -1250,8 +1277,7 @@ def _readd_previous_package_indices(previous_version, new_version, distribution)
     )
 
 
-@sync_to_async
-def _get_previous_release_file(previous_version, distribution):
+def get_previous_release_file(previous_version, distribution):
     previous_release_file_qs = previous_version.get_content(
         ReleaseFile.objects.filter(distribution=distribution)
     )
@@ -1259,6 +1285,9 @@ def _get_previous_release_file(previous_version, distribution):
         message = "Previous ReleaseFile count: {}. There should only be one."
         raise Exception(message.format(previous_release_file_qs.count()))
     return previous_release_file_qs.first()
+
+
+_get_previous_release_file = sync_to_async(get_previous_release_file)
 
 
 @sync_to_async
@@ -1361,3 +1390,43 @@ def _get_source_checksums(source_paragraph, name):
         for checksum_type in settings.ALLOWED_CONTENT_CHECKSUMS
         if checksum_type in checksums
     }
+
+
+def gen_remote_options(remote):
+    return {
+        "distributions": remote.distributions,
+        "components": remote.components,
+        "architectures": remote.architectures,
+        "policy": remote.policy,
+        "sync_sources": remote.sync_sources,
+        "sync_udebs": remote.sync_udebs,
+        "sync_installer": remote.sync_installer,
+        "gpgkey": remote.gpgkey,
+        "ignore_missing_package_indices": remote.ignore_missing_package_indices,
+    }
+
+
+def get_distribution_release_file_artifact_set_sha256(distribution, remote):
+    log.info(_('Downloading Release file for distribution: "{}"').format(distribution))
+    if distribution[-1] == "/":
+        release_file_dir = distribution.strip("/")
+    else:
+        release_file_dir = os.path.join("dists", distribution)
+
+    release_file_info_serialized = {}
+    base_url = os.path.join(remote.url, release_file_dir)
+    for filename in ReleaseFile.SUPPORTED_ARTIFACTS:
+        url = os.path.join(base_url, filename)
+        downloader = remote.get_downloader(url=url)
+        try:
+            result = downloader.fetch()
+        except Exception:
+            continue
+        sha256 = result.artifact_attributes["sha256"]
+        release_file_info_serialized[filename] = sha256
+
+    hash_string = ""
+    for filename, sha256 in release_file_info_serialized.items():
+        hash_string = hash_string + filename + "," + sha256 + "\n"
+
+    return hashlib.sha256(hash_string.encode("utf-8")).hexdigest()

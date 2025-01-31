@@ -6,6 +6,7 @@ obvious example would be a model to represent .deb packages, but other examples 
 like language and Debian installer files. Not included are models for metadata files like Release
 files or APT repository package indices.
 """
+
 import os
 
 from django.db import models
@@ -88,8 +89,6 @@ class BasePackage(Content):
             sourcename,
             "{}.{}".format(self.name, self.SUFFIX),
         )
-
-    repo_key_fields = ("package", "version", "architecture")
 
     class Meta:
         default_related_name = "%(app_label)s_%(model_name)s"
@@ -197,6 +196,11 @@ class SourcePackage(Content):
             if kw in kwargs:
                 kwargs.pop(kw)
         super().__init__(*args, **kwargs)
+
+    @property
+    def sha256(self):
+        """Return the sha256 of the dsc file."""
+        return self.contentartifact_set.get(relative_path=self.relative_path).artifact.sha256
 
     def derived_dsc_filename(self):
         """Print a nice name for the Dsc file."""

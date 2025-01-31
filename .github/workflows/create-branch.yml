@@ -21,33 +21,40 @@ jobs:
       fail-fast: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: "actions/checkout@v4"
         with:
           fetch-depth: 0
-          path: pulp_deb
+          path: "pulp_deb"
 
-      - uses: actions/setup-python@v4
+      - uses: "actions/checkout@v4"
         with:
-          python-version: "3.8"
+          fetch-depth: 1
+          repository: "pulp/plugin_template"
+          path: "plugin_template"
 
-      - name: Install python dependencies
+      - uses: "actions/setup-python@v5"
+        with:
+          python-version: "3.11"
+
+      - name: "Install python dependencies"
         run: |
           echo ::group::PYDEPS
-          pip install bump2version jinja2 pyyaml
+          pip install bump-my-version packaging -r plugin_template/requirements.txt
           echo ::endgroup::
 
-      - name: Setting secrets
-        working-directory: pulp_deb
-        run: python3 .github/workflows/scripts/secrets.py "$SECRETS_CONTEXT"
+      - name: "Setting secrets"
+        working-directory: "pulp_deb"
+        run: |
+          python3 .github/workflows/scripts/secrets.py "$SECRETS_CONTEXT"
         env:
-          SECRETS_CONTEXT: ${{ toJson(secrets) }}
+          SECRETS_CONTEXT: "${{ toJson(secrets) }}"
 
       - name: Determine new branch name
         working-directory: pulp_deb
         run: |
           # Just to be sure...
           git checkout main
-          NEW_BRANCH="$(bump2version --dry-run --list release | sed -Ene 's/^new_version=([[:digit:]]+\.[[:digit:]]+)\..*$/\1/p')"
+          NEW_BRANCH="$(bump-my-version show new_version --increment release | sed -Ene 's/^([[:digit:]]+\.[[:digit:]]+)\.[[:digit:]]+$/\1/p')"
           if [ -z "$NEW_BRANCH" ]
           then
             echo Could not determine the new branch name.
@@ -63,15 +70,21 @@ jobs:
       - name: Bump version on main branch
         working-directory: pulp_deb
         run: |
-          bump2version --no-commit minor
+          bump-my-version bump --no-commit minor
 
       - name: Remove entries from CHANGES directory
         working-directory: pulp_deb
         run: |
           find CHANGES -type f -regex ".*\.\(bugfix\|doc\|feature\|misc\|deprecation\|removal\)" -exec git rm {} +
 
+      - name: Update CI branches in template_config
+        working-directory: plugin_template
+        run: |
+          python3 ./plugin-template pulp_deb --github --latest-release-branch "${NEW_BRANCH}"
+          git add -A
+
       - name: Make a PR with version bump and without CHANGES/*
-        uses: peter-evans/create-pull-request@v4
+        uses: peter-evans/create-pull-request@v6
         with:
           path: pulp_deb
           token: ${{ secrets.RELEASE_TOKEN }}
@@ -80,10 +93,8 @@ jobs:
           branch: minor-version-bump
           base: main
           title: Bump minor version
-          body: '[noissue]'
           commit-message: |
             Bump minor version
-            [noissue]
           delete-branch: true
 
       - name: Push release branch

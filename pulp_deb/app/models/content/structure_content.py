@@ -10,6 +10,7 @@ IMPORTANT: It is essential that these models don't contain anything that isn't s
 information. This ensures, that copying structure content between different Pulp repositories, does
 not inadvertantly copy anything that is not structure relevant.
 """
+
 import os
 
 from django.db import models
@@ -90,13 +91,6 @@ class PackageReleaseComponent(Content):
 
     package = models.ForeignKey(Package, on_delete=models.CASCADE)
     release_component = models.ForeignKey(ReleaseComponent, on_delete=models.CASCADE)
-
-    repo_key_fields = (
-        "release_component",
-        "package__package",
-        "package__version",
-        "package__architecture",
-    )
 
     class Meta:
         default_related_name = "%(app_label)s_%(model_name)s"

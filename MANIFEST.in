@@ -1,5 +1,6 @@
-include CHANGES.rst
+include CHANGES.md
 include COMMITMENT
+exclude CONTRIBUTING.md
 include COPYRIGHT
 include functest_requirements.txt
 include LICENSE
@@ -11,3 +12,4 @@ include unittest_requirements.txt
 include TESTING.md
 recursive-include pulp_deb/tests/functional/data *
 recursive-include pulp_deb/tests/functional/fixtures *
+exclude releasing.md

@@ -8,6 +8,7 @@ from pulpcore.plugin.viewsets import (
     ContentFilter,
     ContentViewSet,
     NamedModelViewSet,
+    NoArtifactContentViewSet,
     SingleArtifactContentUploadViewSet,
 )
 
@@ -408,7 +409,7 @@ class ReleaseFilter(ContentFilter):
         fields = ["codename", "suite", "distribution", "version", "label", "origin"]
 
 
-class ReleaseViewSet(ContentViewSet):
+class ReleaseViewSet(NoArtifactContentViewSet):
     # The doc string is a top level element of the user facing REST API documentation:
     """
     The Release contains release file fields, that are not relevant to the APT repo structure.
@@ -440,7 +441,7 @@ class ReleaseArchitectureFilter(ContentFilter):
         fields = ["architecture", "distribution"]
 
 
-class ReleaseArchitectureViewSet(ContentViewSet):
+class ReleaseArchitectureViewSet(NoArtifactContentViewSet):
     # The doc string is a top level element of the user facing REST API documentation:
     """
     A ReleaseArchitecture represents a single dpkg architecture string.
@@ -479,7 +480,7 @@ class ReleaseComponentFilter(ContentFilter):
         fields = ["component", "distribution"]
 
 
-class ReleaseComponentViewSet(ContentViewSet):
+class ReleaseComponentViewSet(NoArtifactContentViewSet):
     # The doc string is a top level element of the user facing REST API documentation:
     """
     A ReleaseComponent represents a single APT repository component.
@@ -519,10 +520,37 @@ class PackageReleaseComponentViewSet(ContentViewSet):
     filterset_class = PackageReleaseComponentFilter
 
 
+class SourcePackageToReleaseComponentFilter(ContentRelationshipFilter):
+    HELP = "Filter results where SourcePackage in ReleaseComponent"
+    ARG = "release_component_href"
+    ARG_CLASS = models.ReleaseComponent
+
+    def _filter(self, qs, arg, rv_content):
+        sprc_qs = models.SourcePackageReleaseComponent.objects.filter(
+            pk__in=rv_content, release_component=arg.pk
+        )
+        return qs.filter(deb_sourcepackagereleasecomponent__in=sprc_qs)
+
+
+class SourcePackageToReleaseFilter(ContentRelationshipFilter):
+    HELP = "Filter results where SourcePackage in Release"
+    ARG = "release_href"
+    ARG_CLASS = models.Release
+
+    def _filter(self, qs, arg, rv_content):
+        sprc_qs = models.SourcePackageReleaseComponent.objects.filter(
+            pk__in=rv_content, release_component__distribution=arg.distribution
+        )
+        return qs.filter(deb_sourcepackagereleasecomponent__in=sprc_qs)
+
+
 class SourcePackageFilter(ContentFilter):
     """
     FilterSet for Debian Source Packages.
     """
+
+    release_component = SourcePackageToReleaseComponentFilter()
+    release = SourcePackageToReleaseFilter()
 
     class Meta:
         model = models.SourcePackage
@@ -535,6 +563,7 @@ class SourcePackageFilter(ContentFilter):
             "maintainer",
             "uploaders",
             "homepage",
+            "relative_path",
             "vcs_browser",
             "vcs_arch",
             "vcs_bzr",
@@ -567,7 +596,7 @@ class SourcePackageViewSet(SingleArtifactContentUploadViewSet):
     """
 
     endpoint_name = "source_packages"
-    queryset = models.SourcePackage.objects.prefetch_related("_artifacts")
+    queryset = models.SourcePackage.objects.prefetch_related("_artifacts", "contentartifact_set")
     serializer_class = serializers.SourcePackageSerializer
     filterset_class = SourcePackageFilter
 

@@ -5,8 +5,15 @@ from django.conf import settings
 
 from debian import deb822, debfile
 
-from rest_framework.serializers import CharField, DictField, Field, ValidationError, Serializer
-from pulpcore.plugin.models import Artifact, CreatedResource, RemoteArtifact
+from rest_framework.serializers import (
+    CharField,
+    DictField,
+    ListField,
+    Field,
+    ValidationError,
+    Serializer,
+)
+from pulpcore.plugin.models import Artifact, Content, CreatedResource
 from pulpcore.plugin.serializers import (
     ContentChecksumSerializer,
     MultipleArtifactContentSerializer,
@@ -459,7 +466,7 @@ class BasePackage822Serializer(SingleArtifactContentSerializer):
         package_fields["custom_fields"] = custom_fields
         return cls(data=package_fields, **kwargs)
 
-    def to822(self, component=""):
+    def to822(self, component="", artifact_dict=None, remote_artifact_dict=None):
         """Create deb822.Package object from model."""
         ret = deb822.Packages()
 
@@ -472,25 +479,18 @@ class BasePackage822Serializer(SingleArtifactContentSerializer):
         if custom_fields:
             ret.update(custom_fields)
 
-        try:
-            artifact = self.instance._artifacts.get()
-            artifact.touch()  # Orphan cleanup protection until we are done!
-            if artifact.md5:
-                ret["MD5sum"] = artifact.md5
-            if artifact.sha1:
-                ret["SHA1"] = artifact.sha1
-            ret["SHA256"] = artifact.sha256
-            ret["Size"] = str(artifact.size)
-        except Artifact.DoesNotExist:
-            artifact = RemoteArtifact.objects.filter(sha256=self.instance.sha256).first()
-            if artifact.md5:
-                ret["MD5sum"] = artifact.md5
-            if artifact.sha1:
-                ret["SHA1"] = artifact.sha1
-            ret["SHA256"] = artifact.sha256
-            ret["Size"] = str(artifact.size)
+        artifact = None
+        if artifact_dict and self.instance.sha256 in artifact_dict:
+            artifact = artifact_dict[self.instance.sha256]
+        elif remote_artifact_dict and self.instance.sha256 in remote_artifact_dict:
+            artifact = remote_artifact_dict[self.instance.sha256]
 
-        ret["Filename"] = self.instance.filename(component)
+        if artifact:
+            ret.update({"MD5sum": artifact.md5} if artifact.md5 else {})
+            ret.update({"SHA1": artifact.sha1} if artifact.sha1 else {})
+            ret.update({"SHA256": artifact.sha256})
+            ret.update({"Size": str(artifact.size)})
+        ret.update({"Filename": self.instance.filename(component)})
 
         return ret
 
@@ -721,6 +721,12 @@ class ReleaseSerializer(NoArtifactContentSerializer):
     A Serializer for Release.
     """
 
+    def get_unique_together_validators(self):
+        """
+        We do not want UniqueTogetherValidator since we have retrieve logic!
+        """
+        return []
+
     codename = CharField()
     suite = CharField()
     distribution = CharField()
@@ -728,6 +734,59 @@ class ReleaseSerializer(NoArtifactContentSerializer):
     origin = NullableCharField(required=False, allow_null=True, default=None)
     label = NullableCharField(required=False, allow_null=True, default=None)
     description = NullableCharField(required=False, allow_null=True, default=None)
+    architectures = ListField(child=CharField(), required=False)
+    components = ListField(child=CharField(), required=False)
+
+    @staticmethod
+    def _get_or_create_content_pk(model, **data):
+        content, created = model.objects.get_or_create(**data)
+        CreatedResource(content_object=content).save()
+        if not created:
+            content.touch()
+        return content.pk
+
+    def retrieve(self, validated_data):
+        """
+        If the Release already exists, retrieve it!
+        """
+        return Release.objects.filter(
+            codename=validated_data["codename"],
+            suite=validated_data["suite"],
+            distribution=validated_data["distribution"],
+            version=validated_data.get("version", NULL_VALUE),
+            origin=validated_data.get("origin", NULL_VALUE),
+            label=validated_data.get("label", NULL_VALUE),
+            description=validated_data.get("description", NULL_VALUE),
+        ).first()
+
+    def create(self, validated_data):
+        architectures = validated_data.pop("architectures", [])
+        components = validated_data.pop("components", [])
+        repository = validated_data.pop("repository", None)
+
+        content_pks = []
+
+        release = super().create(validated_data)
+        content_pks.append(release.pk)
+
+        for arch in architectures:
+            architecture_pk = self._get_or_create_content_pk(
+                ReleaseArchitecture, distribution=release.distribution, architecture=arch
+            )
+            content_pks.append(architecture_pk)
+
+        for comp in components:
+            component_pk = self._get_or_create_content_pk(
+                ReleaseComponent, distribution=release.distribution, component=comp
+            )
+            content_pks.append(component_pk)
+
+        if repository:
+            repository.cast()
+            with repository.new_version() as new_version:
+                new_version.add_content(Content.objects.filter(pk__in=content_pks))
+
+        return release
 
     class Meta(NoArtifactContentSerializer.Meta):
         model = Release
@@ -739,6 +798,8 @@ class ReleaseSerializer(NoArtifactContentSerializer):
             "origin",
             "label",
             "description",
+            "architectures",
+            "components",
         )
 
 
@@ -749,6 +810,21 @@ class ReleaseArchitectureSerializer(NoArtifactContentSerializer):
 
     architecture = CharField(help_text="Name of the architecture.")
     distribution = CharField(help_text="Name of the distribution.")
+
+    def get_unique_together_validators(self):
+        """
+        We do not want UniqueTogetherValidator since we have retrieve logic!
+        """
+        return []
+
+    def retrieve(self, validated_data):
+        """
+        If the ReleaseArchitecture already exists, retrieve it!
+        """
+        return ReleaseArchitecture.objects.filter(
+            architecture=validated_data["architecture"],
+            distribution=validated_data["distribution"],
+        ).first()
 
     class Meta(NoArtifactContentSerializer.Meta):
         model = ReleaseArchitecture
@@ -763,14 +839,33 @@ class ReleaseComponentSerializer(NoArtifactContentSerializer):
     A Serializer for ReleaseComponent.
     """
 
+    def get_unique_together_validators(self):
+        """
+        We do not want UniqueTogetherValidator since we have retrieve logic!
+        """
+        return []
+
+    def retrieve(self, validated_data):
+        """
+        If the ReleaseComponent already exists, retrieve it!
+        """
+        return ReleaseComponent.objects.filter(
+            distribution=validated_data["distribution"],
+            component=validated_data["component"],
+        ).first()
+
     component = CharField(help_text="Name of the component.")
     distribution = CharField(help_text="Name of the distribution.")
+    plain_component = CharField(
+        help_text="Name of the component without any path prefixes.", read_only=True
+    )
 
     class Meta(NoArtifactContentSerializer.Meta):
         model = ReleaseComponent
         fields = NoArtifactContentSerializer.Meta.fields + (
             "component",
             "distribution",
+            "plain_component",
         )
 
 
@@ -1048,6 +1143,7 @@ class SourcePackageSerializer(MultipleArtifactContentSerializer):
         ),
         required=False,
     )
+    sha256 = CharField(help_text=_("sha256 digest of the dsc file."), read_only=True)
     format = CharField(read_only=True)
     source = CharField(read_only=True)
     binary = CharField(read_only=True)
@@ -1120,15 +1216,6 @@ class SourcePackageSerializer(MultipleArtifactContentSerializer):
                 )
             )
 
-        content = SourcePackage.objects.filter(source=data["source"], version=data["version"])
-        if content.exists():
-            raise ValidationError(
-                _(
-                    "There is already a DSC file with version '{version}' and source name "
-                    "'{source}'."
-                ).format(version=data["version"], source=data["source"])
-            )
-
         artifacts = {data["relative_path"]: data["artifact"]}
         for source in data["checksums_sha256"]:
             content = Artifact.objects.filter(sha256=source["sha256"], size=source["size"])
@@ -1139,17 +1226,24 @@ class SourcePackageSerializer(MultipleArtifactContentSerializer):
                         " and sha256 '{sha256}'."
                     ).format(name=source["name"], sha256=source["sha256"])
                 )
-            artifacts[
-                os.path.join(os.path.dirname(data["relative_path"]), source["name"])
-            ] = content.first()
+            artifacts[os.path.join(os.path.dirname(data["relative_path"]), source["name"])] = (
+                content.first()
+            )
 
         data["artifacts"] = artifacts
         return data
+
+    def retrieve(self, data):
+        """
+        If the Source Package already exists, retrieve it
+        """
+        return SourcePackage.objects.filter(source=data["source"], version=data["version"]).first()
 
     class Meta:
         fields = MultipleArtifactContentSerializer.Meta.fields + (
             "artifact",
             "relative_path",
+            "sha256",
             "format",
             "source",
             "binary",
@@ -1190,13 +1284,13 @@ class SourcePackageReleaseComponentSerializer(NoArtifactContentSerializer):
         help_text="Source package that is contained in release_component.",
         many=False,
         queryset=SourcePackage.objects.all(),
-        view_name="deb-souce_package_component-detail",
+        view_name="content-deb/source_packages-detail",
     )
     release_component = DetailRelatedField(
         help_text="ReleaseComponent this source package is contained in.",
         many=False,
         queryset=ReleaseComponent.objects.all(),
-        view_name="deb-release_component-detail",
+        view_name="content-deb/release_components-detail",
     )
 
     class Meta(NoArtifactContentSerializer.Meta):

@@ -1,7 +1,10 @@
 import asyncio
 import os
 import shutil
+import random
+import string
 from contextlib import suppress
+from pathlib import Path
 
 from datetime import datetime, timezone
 from debian import deb822
@@ -10,12 +13,15 @@ import tempfile
 
 from django.conf import settings
 from django.core.files import File
+from django.db import transaction
 from django.db.utils import IntegrityError
 from django.forms.models import model_to_dict
 
 from pulpcore.plugin.models import (
+    Artifact,
     PublishedArtifact,
     PublishedMetadata,
+    RemoteArtifact,
     RepositoryVersion,
 )
 
@@ -43,7 +49,6 @@ from pulp_deb.app.constants import (
     NO_MD5_WARNING_MESSAGE,
     CHECKSUM_TYPE_MAP,
 )
-
 
 import logging
 from gettext import gettext as _
@@ -77,6 +82,7 @@ def publish(
     repository_version_pk,
     simple,
     structured,
+    checkpoint=False,
     signing_service_pk=None,
     publish_upstream_release_fields=None,
 ):
@@ -95,10 +101,9 @@ def publish(
         log.warning(_(NO_MD5_WARNING_MESSAGE))
 
     repo_version = RepositoryVersion.objects.get(pk=repository_version_pk)
-    if signing_service_pk:
-        signing_service = AptReleaseSigningService.objects.get(pk=signing_service_pk)
-    else:
-        signing_service = None
+    signing_service = (
+        AptReleaseSigningService.objects.get(pk=signing_service_pk) if signing_service_pk else None
+    )
 
     log.info(
         _(
@@ -110,8 +115,10 @@ def publish(
             structured=structured,
         )
     )
-    with tempfile.TemporaryDirectory("."):
-        with AptPublication.create(repo_version, pass_through=False) as publication:
+    with tempfile.TemporaryDirectory(".") as temp_dir:
+        with AptPublication.create(
+            repo_version, pass_through=False, checkpoint=checkpoint
+        ) as publication:
             publication.simple = simple
             publication.structured = structured
             publication.signing_service = signing_service
@@ -127,14 +134,13 @@ def publish(
                     release.description = repository.description
 
                 component = "all"
-                architectures = (
+                architectures = list(
                     Package.objects.filter(
                         pk__in=repo_version.content.order_by("-pulp_created"),
                     )
                     .distinct("architecture")
                     .values_list("architecture", flat=True)
                 )
-                architectures = list(architectures)
                 if "all" not in architectures:
                     architectures.append("all")
 
@@ -143,28 +149,34 @@ def publish(
                     release=release,
                     components=[component],
                     architectures=architectures,
+                    temp_dir=temp_dir,
                     signing_service=repository.signing_service,
                 )
 
-                for package in Package.objects.filter(
-                    pk__in=repo_version.content.order_by("-pulp_created"),
-                ):
-                    release_helper.components[component].add_package(package)
+                packages = Package.objects.filter(
+                    pk__in=repo_version.content.order_by("-pulp_created")
+                ).prefetch_related("contentartifact_set", "_artifacts")
+                artifact_dict, remote_artifact_dict = _batch_fetch_artifacts(packages)
+                release_helper.components[component].add_packages(
+                    packages, artifact_dict, remote_artifact_dict
+                )
 
-                for source_package in SourcePackage.objects.filter(
+                source_packages = SourcePackage.objects.filter(
                     pk__in=repo_version.content.order_by("-pulp_created"),
-                ):
-                    release_helper.components[component].add_source_package(source_package)
+                )
+                release_helper.components[component].add_source_packages(source_packages)
 
                 release_helper.finish()
 
             if structured:
+                release_components = ReleaseComponent.objects.filter(
+                    pk__in=repo_version.content.order_by("-pulp_created")
+                )
+
                 distributions = list(
-                    ReleaseComponent.objects.filter(
-                        pk__in=repo_version.content.order_by("-pulp_created"),
+                    release_components.distinct("distribution").values_list(
+                        "distribution", flat=True
                     )
-                    .distinct("distribution")
-                    .values_list("distribution", flat=True)
                 )
 
                 if simple and "default" in distributions:
@@ -217,37 +229,59 @@ def publish(
                         if repository.description:
                             release.description = repository.description
 
-                    release_components = ReleaseComponent.objects.filter(
-                        pk__in=repo_version.content.order_by("-pulp_created"),
-                        distribution=distribution,
+                    release_components_filtered = release_components.filter(
+                        distribution=distribution
                     )
                     components = list(
-                        release_components.distinct("component").values_list("component", flat=True)
+                        release_components_filtered.distinct("component").values_list(
+                            "component", flat=True
+                        )
                     )
+
+                    signing_service = repository.release_signing_service(release)
 
                     release_helper = _ReleaseHelper(
                         publication=publication,
                         components=components,
                         architectures=architectures,
                         release=release,
-                        signing_service=repository.release_signing_service(release),
+                        temp_dir=temp_dir,
+                        signing_service=signing_service,
                     )
 
-                    for prc in PackageReleaseComponent.objects.filter(
+                    package_release_components = PackageReleaseComponent.objects.filter(
                         pk__in=repo_version.content.order_by("-pulp_created"),
-                        release_component__in=release_components,
-                    ):
-                        release_helper.components[prc.release_component.component].add_package(
-                            prc.package
+                        release_component__in=release_components_filtered,
+                    ).select_related("release_component", "package")
+
+                    source_package_release_components = (
+                        SourcePackageReleaseComponent.objects.filter(
+                            pk__in=repo_version.content.order_by("-pulp_created"),
+                            release_component__in=release_components_filtered,
+                        ).select_related("release_component", "source_package")
+                    )
+
+                    for component in components:
+                        packages = Package.objects.filter(
+                            pk__in=[
+                                prc.package.pk
+                                for prc in package_release_components
+                                if prc.release_component.component == component
+                            ]
+                        ).prefetch_related("contentartifact_set", "_artifacts")
+                        artifact_dict, remote_artifact_dict = _batch_fetch_artifacts(packages)
+                        release_helper.components[component].add_packages(
+                            packages,
+                            artifact_dict,
+                            remote_artifact_dict,
                         )
 
-                    for drc in SourcePackageReleaseComponent.objects.filter(
-                        pk__in=repo_version.content.order_by("-pulp_created"),
-                        release_component__in=release_components,
-                    ):
-                        release_helper.components[
-                            drc.release_component.component
-                        ].add_source_package(drc.source_package)
+                        source_packages = [
+                            drc.source_package
+                            for drc in source_package_release_components
+                            if drc.release_component.component == component
+                        ]
+                        release_helper.components[component].add_source_packages(source_packages)
 
                     release_helper.save_unsigned_metadata()
                     release_helpers.append(release_helper)
@@ -298,46 +332,77 @@ class _ComponentHelper:
             source_index_path,
         )
 
-    def add_package(self, package):
-        with suppress(IntegrityError):
-            published_artifact = PublishedArtifact(
-                relative_path=package.filename(self.component),
-                publication=self.parent.publication,
-                content_artifact=package.contentartifact_set.get(),
-            )
-            published_artifact.save()
-        package_serializer = Package822Serializer(package, context={"request": None})
+    def add_packages(self, packages, artifact_dict, remote_artifact_dict):
+        published_artifacts = []
+        package_data = []
 
-        try:
-            package_serializer.to822(self.component).dump(
-                self.package_index_files[package.architecture][0]
-            )
-        except KeyError:
-            log.warn(
-                f"Published package '{package.relative_path}' with architecture "
-                f"'{package.architecture}' was not added to component '{self.component}' in "
-                f"distribution '{self.parent.distribution}' because it lacks this architecture!"
-            )
-        else:
-            self.package_index_files[package.architecture][0].write(b"\n")
+        content_artifacts = {
+            package.pk: list(package.contentartifact_set.all()) for package in packages
+        }
+
+        for package in packages:
+            with suppress(IntegrityError):
+                content_artifact = content_artifacts.get(package.pk, [None])[0]
+                relative_path = package.filename(self.component)
+
+                published_artifact = PublishedArtifact(
+                    relative_path=relative_path,
+                    publication=self.parent.publication,
+                    content_artifact=content_artifact,
+                )
+                published_artifacts.append(published_artifact)
+                package_data.append((package, package.architecture))
+
+        with transaction.atomic():
+            if published_artifacts:
+                PublishedArtifact.objects.bulk_create(published_artifacts, ignore_conflicts=True)
+
+        for package, architecture in package_data:
+            package_serializer = Package822Serializer(package, context={"request": None})
+            try:
+                package_serializer.to822(self.component, artifact_dict, remote_artifact_dict).dump(
+                    self.package_index_files[architecture][0]
+                )
+            except KeyError:
+                log.warn(
+                    f"Published package '{package.relative_path}' with architecture "
+                    f"'{architecture}' was not added to component '{self.component}' in "
+                    f"distribution '{self.parent.distribution}' because it lacks this architecture!"
+                )
+            else:
+                self.package_index_files[architecture][0].write(b"\n")
 
     # Publish DSC file and setup to create Sources Indices file
-    def add_source_package(self, source_package):
-        artifact_set = source_package.contentartifact_set.all()
-        for content_artifact in artifact_set:
-            published_artifact = PublishedArtifact(
-                relative_path=source_package.derived_path(
-                    os.path.basename(content_artifact.relative_path), self.component
-                ),
-                publication=self.parent.publication,
-                content_artifact=content_artifact,
+    def add_source_packages(self, source_packages):
+        published_artifacts = []
+        source_package_data = []
+
+        for source_package in source_packages:
+            with suppress(IntegrityError):
+                artifact_set = source_package.contentartifact_set.all()
+                for content_artifact in artifact_set:
+                    published_artifact = PublishedArtifact(
+                        relative_path=source_package.derived_path(
+                            os.path.basename(content_artifact.relative_path), self.component
+                        ),
+                        publication=self.parent.publication,
+                        content_artifact=content_artifact,
+                    )
+                    published_artifacts.append(published_artifact)
+                source_package_data.append(source_package)
+
+        with transaction.atomic():
+            if published_artifacts:
+                PublishedArtifact.objects.bulk_create(published_artifacts, ignore_conflicts=True)
+
+        for source_package in source_package_data:
+            dsc_file_822_serializer = DscFile822Serializer(
+                source_package, context={"request": None}
             )
-            published_artifact.save()
-        dsc_file_822_serializer = DscFile822Serializer(source_package, context={"request": None})
-        dsc_file_822_serializer.to822(self.component, paragraph=True).dump(
-            self.source_index_file_info[0]
-        )
-        self.source_index_file_info[0].write(b"\n")
+            dsc_file_822_serializer.to822(self.component, paragraph=True).dump(
+                self.source_index_file_info[0]
+            )
+            self.source_index_file_info[0].write(b"\n")
 
     def finish(self):
         # Publish Packages files
@@ -352,6 +417,13 @@ class _ComponentHelper:
                 publication=self.parent.publication, file=File(open(gz_package_index_path, "rb"))
             )
             gz_package_index.save()
+
+            # Generating metadata files using checksum
+            if settings.APT_BY_HASH:
+                self.generate_by_hash(
+                    package_index_path, package_index, gz_package_index_path, gz_package_index
+                )
+
             self.parent.add_metadata(package_index)
             self.parent.add_metadata(gz_package_index)
         # Publish Sources Indices file
@@ -367,8 +439,30 @@ class _ComponentHelper:
                 publication=self.parent.publication, file=File(open(gz_source_index_path, "rb"))
             )
             gz_source_index.save()
+
+            # Generating metadata files using checksum
+            if settings.APT_BY_HASH:
+                self.generate_by_hash(
+                    source_index_path, source_index, gz_source_index_path, gz_source_index
+                )
+
             self.parent.add_metadata(source_index)
             self.parent.add_metadata(gz_source_index)
+
+    def generate_by_hash(self, index_path, index, gz_index_path, gz_index):
+        for path, index in (
+            (index_path, index),
+            (gz_index_path, gz_index),
+        ):
+            for checksum in settings.ALLOWED_CONTENT_CHECKSUMS:
+                if checksum in CHECKSUM_TYPE_MAP:
+                    hashed_index_path = _fetch_file_checksum(path, index, checksum)
+                    hashed_index = PublishedMetadata.create_from_file(
+                        publication=self.parent.publication,
+                        file=File(open(path, "rb")),
+                        relative_path=hashed_index_path,
+                    )
+                    hashed_index.save()
 
 
 class _ReleaseHelper:
@@ -378,9 +472,11 @@ class _ReleaseHelper:
         components,
         architectures,
         release,
+        temp_dir,
         signing_service=None,
     ):
         self.publication = publication
+        self.temp_env = {"PULP_TEMP_WORKING_DIR": _create_random_directory(temp_dir)}
         self.distribution = distribution = release.distribution
         self.dists_subfolder = distribution.strip("/") if distribution != "/" else "flat-repo"
         if distribution[-1] == "/":
@@ -406,6 +502,7 @@ class _ReleaseHelper:
         self.release["Components"] = ""  # Will be set later
         if release.description != NULL_VALUE:
             self.release["Description"] = release.description
+        self.release["Acquire-By-Hash"] = "yes" if settings.APT_BY_HASH else "no"
 
         for checksum_type, deb_field in CHECKSUM_TYPE_MAP.items():
             if checksum_type in settings.ALLOWED_CONTENT_CHECKSUMS:
@@ -460,7 +557,9 @@ class _ReleaseHelper:
     async def sign_metadata(self):
         self.signed = {"signatures": {}}
         if self.signing_service:
-            self.signed = await self.signing_service.asign(self.release_path)
+            self.signed = await self.signing_service.asign(
+                self.release_path, env_vars=self.temp_env
+            )
 
     def save_signed_metadata(self):
         for signature_file in self.signed["signatures"].values():
@@ -480,3 +579,28 @@ def _zip_file(file_path):
         with GzipFile(gz_file_path, "wb") as f_out:
             shutil.copyfileobj(f_in, f_out)
     return gz_file_path
+
+
+def _fetch_file_checksum(file_path, index, checksum):
+    digest = getattr(index.contentartifact_set.first().artifact, checksum)
+    checksum_type = CHECKSUM_TYPE_MAP[checksum]
+    hashed_path = Path(file_path).parents[0] / "by-hash" / checksum_type / digest
+    return hashed_path
+
+
+def _batch_fetch_artifacts(packages):
+    sha256_values = [package.sha256 for package in packages if package.sha256]
+    artifacts = Artifact.objects.filter(sha256__in=sha256_values)
+    artifact_dict = {artifact.sha256: artifact for artifact in artifacts}
+
+    remote_artifacts = RemoteArtifact.objects.filter(sha256__in=sha256_values)
+    remote_artifact_dict = {artifact.sha256: artifact for artifact in remote_artifacts}
+
+    return artifact_dict, remote_artifact_dict
+
+
+def _create_random_directory(path):
+    dir_name = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+    dir_path = path + "/" + dir_name
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path

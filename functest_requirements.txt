@@ -1,6 +1,7 @@
-pytest
+pytest<8
 python-debian>=0.1.36
 pytest-custom_exit_code
 pytest-xdist
 trustme~=1.0.0
 proxy.py~=2.4.3
+pytest-timeout
