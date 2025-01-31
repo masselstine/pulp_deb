@@ -82,7 +82,7 @@ def publish(
     repository_version_pk,
     simple,
     structured,
-    checkpoint,
+    checkpoint=False,
     signing_service_pk=None,
     publish_upstream_release_fields=None,
 ):
